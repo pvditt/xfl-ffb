@@ -14,7 +14,20 @@ cred = credentials.Certificate("firebase_key.json")
 default_app = initialize_app(cred)
 db = firestore.client()
 
+# sometimes teams are given as TeamID instead of a mascot name
+team_mappings = {
+    600: "Renegades",
+    601: "Roughnecks",
+    602: "Wildcats",
+    603: "Dragons",
+    604: "Defenders",
+    605: "Guardians",
+    606: "BattleHawks",
+    607: "Vipers"
+}
 
+
+# TODO: break this method up
 @app.route('/load_game_stats')
 def load_single_game_stats():
     players_with_game_stats = {}
@@ -26,6 +39,7 @@ def load_single_game_stats():
     page = requests.get(url)
     soup = BeautifulSoup(page.text, 'html5lib')
     results = soup.find_all('script', {'type': 'text/javascript'})
+    issues = {"issues_with": []}
     for script in results:
         js_var = script.string.strip()
         if "offensiveStats" in js_var:
@@ -89,7 +103,41 @@ def load_single_game_stats():
                 defensive_stats = get_defensive_stats(home_defender)
                 players_with_game_stats.get(player_id).update(defensive_stats)
 
-    results = {"issues_with": []}
+        if "playList" in js_var:
+            possessions = json.loads(js_var.split(" = ")[1][:-1])
+            for play in possessions["plays"]:
+                if play["IsScoringPlay"]:
+                    if play["playScoreType"] != "Touchdown":
+                        docs = list(db.collection(team_mappings.get(play["playScoringTeamId"])).where(
+                            "first_name", "array_contains", play["playScorer"].split()[0]).where(
+                            "last_name", "==", play["playScorer"].split()[1]).stream())
+                        if len(docs) != 1:
+                            issues.get("issues_with").append(play["playScorer"] + "-" + team_mappings.get(play["playScoringTeamId"]))
+                        else:
+                            player_id = docs[0].to_dict().get("player_id")
+                            if player_id not in players_with_game_stats:
+                                players_with_game_stats[player_id] = {}
+                            if play["playScoreType"] == "Fumble":
+                                fumble_return_tds = players_with_game_stats.get("fumble_return_tds", 0)
+                                players_with_game_stats.get(player_id).update({"fumble_return_tds": fumble_return_tds + 1})
+                            elif play["playScoreType"] == "Intercept":
+                                int_return_tds = players_with_game_stats.get("int_return_tds", 0)
+                                players_with_game_stats.get(player_id).update({"int_return_tds": int_return_tds + 1})
+                            elif play["playScoreType"] == "Field Goal":
+                                if "field_goals" not in players_with_game_stats.get(player_id):
+                                    players_with_game_stats.get(player_id)["field_goals"] = []
+                                fg_distance = play["ShortPlayDescription"].split()[0]
+                                players_with_game_stats.get(player_id).get("field_goals").append(fg_distance)
+                            elif play["playScoreType"] == "One Point Successful Conversion":
+                                one_point_conversions = players_with_game_stats.get("one_point_conversions", 0)
+                                players_with_game_stats.get(player_id).update({"one_point_conversions": one_point_conversions + 1})
+                            elif play["playScoreType"] == "Two Point Successful Conversion":
+                                two_point_conversions = players_with_game_stats.get("two_point_conversions", 0)
+                                players_with_game_stats.get(player_id).update({"two_point_conversions": two_point_conversions + 1})
+                            elif play["playScoreType"] == "Three Point Successful Conversion":
+                                three_point_conversions = players_with_game_stats.get("three_point_conversions", 0)
+                                players_with_game_stats.get(player_id).update({"three_point_conversions": three_point_conversions + 1})
+
     for player_id in players_with_game_stats.keys():
         doc_ref = db.collection(player_id.split("-")[-2]).document(player_id)
         key = "week" + week
@@ -97,7 +145,7 @@ def load_single_game_stats():
             doc_ref.update({key: players_with_game_stats.get(player_id)})
         except:
             doc_ref.set({key: players_with_game_stats.get(player_id)})
-            results.get("issues_with").append(player_id)
+            issues.get("issues_with").append(player_id)
 
     # batch = db.batch()
     # for player_id in players_with_game_stats.keys():
@@ -106,7 +154,7 @@ def load_single_game_stats():
     #     batch.update(doc_ref, {key: players_with_game_stats.get(player_id)})
     # batch.commit()
 
-    return jsonify(results)
+    return jsonify(issues)
 
 
 def get_defensive_stats(defender):
@@ -115,7 +163,7 @@ def get_defensive_stats(defender):
         "sacks": defender["Sacks"],
         "tackles_for_loss": defender["TacklesForLoss"],
         "interceptions": defender["Interceptions"],
-        "passes_defender": defender["PassDefensed"],
+        "passes_defended": defender["PassDefensed"],
         "forced_fumbles": defender["ForcedFumbles"],
         "fumble_recoveries": defender["FumbleRecoveries"],
         "safety": defender["safety"],
@@ -250,7 +298,7 @@ def create_player(first_name, last_name, position, jersey_number, team):
     player_id = first_name[0] + "." + last_name + "-" + team + "-" + jersey_number
     player_meta = {
         "player_id": player_id,
-        "first_name": first_name,
+        "first_name": [first_name],
         "last_name": last_name,
         "position": position,
         "jersey_number": jersey_number,
