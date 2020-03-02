@@ -27,6 +27,34 @@ team_mappings = {
 }
 
 
+stat_value_mappings = {
+    "pass_touchdowns": 4,
+    "pass_yards": 0.04,
+    "rush_touchdowns": 6,
+    "rush_yards": 0.1,
+    "receiving_touchdowns": 6,
+    "receiving_yards": 0.1,
+    "receptions": 0.5,
+    "interceptions": -2,
+    "one_point_conversions": 1,
+    "two_point_conversions": 2,
+    "three_point_conversions": 3,
+    "forced_fumbles": 2,
+    "fumble_recoveries": 2,
+    "defensive_interceptions": 4,
+    "tackles": 0.2,
+    "sacks": 2,
+    "tackles_for_loss": 0.5,
+    "passes_defended": 0.5,
+    "safety": 4,
+    "short_fg": 3,
+    "medium_fg": 4,
+    "long_fg": 5,
+    "int_return_tds": 6,
+    "fumble_return_tds": 6
+}
+
+
 # TODO: break this method up
 @app.route('/load_game_stats')
 def load_single_game_stats():
@@ -162,7 +190,7 @@ def get_defensive_stats(defender):
         "tackles": defender["Tackles"],
         "sacks": defender["Sacks"],
         "tackles_for_loss": defender["TacklesForLoss"],
-        "interceptions": defender["Interceptions"],
+        "defensive_interceptions": defender["Interceptions"],
         "passes_defended": defender["PassDefensed"],
         "forced_fumbles": defender["ForcedFumbles"],
         "fumble_recoveries": defender["FumbleRecoveries"],
@@ -334,18 +362,58 @@ def delete_player(player_id):
         print("Issue deleting player with id: " + player_id)
 
 
-@app.route('/fetch_fantasy_teams')
+@app.route('/get_teams_scores')
+def get_team_scores():
+    week_number = request.args.get("week")
+    teams = get_league_rosters()
+    team_stats = {}
+    for team, roster in teams.items():
+        team_stats[team] = {}
+        team_total_points = 0
+        for player_id in roster:
+            player = db.collection(player_id.split("-")[-2]).document(player_id).get().to_dict()
+            player_stats = player.get("week" + week_number)
+            if player_stats is None:
+                team_stats[team][player_id] = {"total_points": 0}
+            else:
+                player_points = get_player_points_total(player_stats, player.get("position") == "TE")
+                team_total_points += player_points
+                player_stats["player_points_total"] = player_points
+                team_stats[team][player_id] = player_stats
+        team_stats[team]["team_total_points"] = round(team_total_points, 2)
+    return jsonify(team_stats)
+
+
+def get_player_points_total(player_stats, multiplier):
+    total_points = 0
+    for stat, value in player_stats.items():
+        if stat == "field_goals":
+            for fg in value:
+                if int(fg) >= 50:
+                    total_points += stat_value_mappings.get("long_fg")
+                elif int(fg) >= 40:
+                    total_points += stat_value_mappings.get("medium_fg")
+                else:
+                    total_points += stat_value_mappings.get("short_fg")
+        else:
+            total_points += stat_value_mappings.get(stat) * value
+    if multiplier:
+        return round(total_points * 1.5, 2)
+    return round(total_points, 2)
+
 def get_league_rosters():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds = ServiceAccountCredentials.from_json_keyfile_name('client_secret.json', scope)
     client = gspread.authorize(creds)
     sheet = client.open("XFL Rosters").sheet1
-    player_pool = []
-    for x in range(7):
+    teams = {}
+    for x in range(5):
+        team = sheet.col_values(x + 1)[0]
+        teams[team] = []
         players = sheet.col_values(x + 1)[1:]
         for player in players:
-            player_pool.append(player)
-    print(player_pool)
+            teams[team].append(player)
+    return teams
 
 
 @app.route("/fetch_team_stats")
